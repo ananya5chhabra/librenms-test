@@ -57,7 +57,6 @@ if ($device['os'] == 'timos') {
     foreach ($bgpPeers ?? [] as $vrfOid => $vrf) {
         $vrfId = $map_vrf['byOid'][$vrfOid]['vrf_id'] ?? null;
 
-        d_echo($vrfId);
 
         foreach ($vrf as $address => $value) {
             $astext = \LibreNMS\Util\AutonomousSystem::get($value[$mib_root . '.1.18'] ?? $value['TIMETRA-BGP-MIB::tBgpPeerNgPeerAS4Byte'] ?? null)->name();
@@ -134,12 +133,12 @@ if ($device['os'] == 'timos') {
         '1_2'   => [
             'recv'   => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.37',
             'sent'   => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.38',
-            'filter' => null,
+            'filter' => 'ipv4',
         ],
         '1_128' => [
             'recv'   => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.13',
             'sent'   => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.14',
-            'filter' => null,
+            'filter' => 'ipv4',
         ],
         '2_1'   => [
             'recv'   => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.27',
@@ -149,12 +148,12 @@ if ($device['os'] == 'timos') {
         '2_2'   => [
             'recv'   => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.95',
             'sent'   => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.96',
-            'filter' => null,
+            'filter' => 'ipv6',
         ],
         '2_128' => [
             'recv'   => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.40',
             'sent'   => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.41',
-            'filter' => null,
+            'filter' => 'ipv6',
         ],
     ];
 
@@ -209,7 +208,6 @@ if ($device['os'] == 'timos') {
             $afi_name  = $afi_map[(int) $afi]   ?? "afi$afi";
             $safi_name = $safi_map[(int) $safi] ?? "safi$safi";
 
-            d_echo("Nokia TIMOS: Writing — index=$index addr=$address addr_type=$peer_addr_type ({$afi_name}/{$safi_name}) recv=$pfxRcv sent=$pfxSent\n");
 
             add_cbgp_peer($device, $peer, $afi_name, $safi_name, $pfxRcv, $pfxSent);
         }
