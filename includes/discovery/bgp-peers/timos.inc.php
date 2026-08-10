@@ -28,13 +28,20 @@ use App\Facades\LibrenmsConfig;
 use LibreNMS\Util\IP;
 
 if ($device['os'] == 'timos') {
-    $bgpPeersCache = SnmpQuery::numericIndex()->walk('TIMETRA-BGP-MIB::tBgpPeerNgTable')->valuesByIndex();
+    $mib_root = '.1.3.6.1.4.1.6527.3.1.2.14.4.8';
+
+    $bgpPeersCache = SnmpQuery::numericIndex()->walk($mib_root)->valuesByIndex();
     foreach ($bgpPeersCache as $key => $value) {
         $oid = explode('.', (string) $key);
         $vrfInstance = $oid[0];
         $address = implode('.', array_slice($oid, 3));
         if (strlen($address) > 15) {
-            $address = IP::fromSnmpString($address)->compressed();
+            try {
+                $address = IP::fromSnmpString($address)->compressed();
+            } catch (\LibreNMS\Exceptions\InvalidIpException) {
+                d_echo("Nokia TIMOS: Skipping non-IP entry: $address\n");
+                continue;
+            }
         }
         $bgpPeers[$vrfInstance][$address] = $value;
     }
@@ -52,14 +59,14 @@ if ($device['os'] == 'timos') {
         d_echo($vrfId);
 
         foreach ($vrf as $address => $value) {
-            $astext = \LibreNMS\Util\AutonomousSystem::get($value['TIMETRA-BGP-MIB::tBgpPeerNgPeerAS4Byte'])->name();
+            $astext = \LibreNMS\Util\AutonomousSystem::get($value[$mib_root . '.1.18'] ?? $value['TIMETRA-BGP-MIB::tBgpPeerNgPeerAS4Byte'] ?? null)->name();
             if (! DeviceCache::getPrimary()->bgppeers()->where('bgpPeerIdentifier', $address)->where('vrf_id', $vrfId)->exists()) {
                 $peers = [
                     'device_id' => $device['device_id'],
                     'vrf_id' => $vrfId,
                     'bgpPeerIdentifier' => $address,
-                    'bgpPeerRemoteAs' => $value['TIMETRA-BGP-MIB::tBgpPeerNgPeerAS4Byte'],
                     'bgpPeerDescr' => $value['TIMETRA-BGP-MIB::tBgpPeerNgDescription'] ?? '',
+                    'bgpPeerRemoteAs' => $value[$mib_root . '.1.18'] ?? $value['TIMETRA-BGP-MIB::tBgpPeerNgPeerAS4Byte'] ?? null,
                     'bgpPeerState' => 'idle',
                     'bgpPeerAdminStatus' => 'stop',
                     'bgpLocalAddr' => '0.0.0.0',
@@ -85,7 +92,7 @@ if ($device['os'] == 'timos') {
                 echo '+';
             } else {
                 $peers = [
-                    'bgpPeerRemoteAs' => $value['TIMETRA-BGP-MIB::tBgpPeerNgPeerAS4Byte'],
+                    'bgpPeerRemoteAs' => $value[$mib_root . '.1.18'] ?? $value['TIMETRA-BGP-MIB::tBgpPeerNgPeerAS4Byte'] ?? null,
                     'astext' => $astext,
                 ];
                 $affected = DeviceCache::getPrimary()->bgppeers()->where('bgpPeerIdentifier', $address)->where('vrf_id', $vrfId)->update($peers);
@@ -95,12 +102,130 @@ if ($device['os'] == 'timos') {
         }
     }
 
-    // clean up peers
+    // Remove peers from the database that no longer exist on the router
     if (isset($seenPeerID) && ! is_null($seenPeerID)) {
         $deleted = DeviceCache::getPrimary()->bgppeers()->whereNotIn('bgpPeer_id', $seenPeerID)->delete();
         echo str_repeat('-', $deleted);
     }
 
     unset($bgpPeers);
-    // No return statement here, so standard BGP mib will still be polled after this file is executed.
+
+    // AFI = Address Family Identifier (what type of IP address)
+    $afi_map = [
+        1 => 'ipv4',
+        2 => 'ipv6',
+    ];
+
+    // SAFI = Sub Address Family Identifier (what type of route)
+    $safi_map = [
+        1 => 'unicast',
+        2 => 'multicast',
+        128 => 'vpn',
+    ];
+
+    // SnmpQuery::numericIndex()->valuesByIndex() returns indexes like: "1.ipv4.62.40.116.67"
+    // parts[0]=vrfOid, parts[1]="ipv4"/"ipv6" (string), parts[2..]=address octets
+    $prefix_oids = [
+        '1_1' => [
+            'recv' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.5',
+            'sent' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.6',
+            'filter' => 'ipv4',    // Only accept entries where peer is IPv4
+        ],
+        '1_2' => [
+            'recv' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.37',
+            'sent' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.38',
+            'filter' => null,
+        ],
+        '1_128' => [
+            'recv' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.13',
+            'sent' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.14',
+            'filter' => null,
+        ],
+        '2_1' => [
+            'recv' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.27',
+            'sent' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.28',
+            'filter' => 'ipv6',    // Only accept entries where peer is IPv6
+        ],
+        '2_2' => [
+            'recv' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.95',
+            'sent' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.96',
+            'filter' => null,
+        ],
+        '2_128' => [
+            'recv' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.40',
+            'sent' => '.1.3.6.1.4.1.6527.3.1.2.14.4.8.1.41',
+            'filter' => null,
+        ],
+    ];
+
+    foreach ($prefix_oids as $oid_key => $oid_set) {
+        // Fetch received and sent prefix counts for this AFI/SAFI
+        $recv_data = SnmpQuery::numericIndex()->walk($oid_set['recv'])->valuesByIndex();
+        $sent_data = SnmpQuery::numericIndex()->walk($oid_set['sent'])->valuesByIndex();
+
+        d_echo("Nokia TIMOS: Processing OID key=$oid_key, entries=" . count($recv_data) . "\n");
+
+        // Strip OID prefix to get just the table index: vrfOid.addrType.addrLen.octets
+        // SnmpQuery::numericIndex()->valuesByIndex() returns keys like "6527.3.1.2.14.4.8.1.5.1.1.4.x.x.x.x"
+        // (strips the leading "1.3.6.1.4.1." prefix)
+        $oid_prefix = preg_replace('#^\.?1\.3\.6\.1\.4\.1\.#', '', $oid_set['recv']);
+        foreach ($recv_data as $index => $recv_entry) {
+            $index_str = (string) $index;
+            $index_part = str_starts_with($index_str, $oid_prefix . '.')
+                ? substr($index_str, strlen($oid_prefix) + 1)
+                : $index_str;
+            $parts = explode('.', $index_part);
+
+            if (count($parts) < 6) {
+                d_echo("Nokia TIMOS: Skipping malformed index: $index\n");
+                continue;
+            }
+
+            // parts: [vrfOid, addrType(1=ipv4/2=ipv6), addrLen, octets...]
+            $peer_addr_type = $parts[1] === '1' ? 'ipv4' : ($parts[1] === '2' ? 'ipv6' : $parts[1]);
+
+            if ($oid_set['filter'] !== null && $peer_addr_type !== $oid_set['filter']) {
+                d_echo("Nokia TIMOS: Skipping index=$index (peer addr_type=$peer_addr_type, expected={$oid_set['filter']}) — Nokia firmware bug row, ignoring\n");
+                continue;
+            }
+
+            // Parse the peer IP address from octets (skip vrfOid, addrType, addrLen)
+            if ($peer_addr_type === 'ipv6') {
+                $hex_addr = implode('', array_map(fn($o) => sprintf('%02x', $o), array_slice($parts, 3)));
+                try {
+                    $address = IP::fromHexString($hex_addr)->compressed();
+                } catch (\LibreNMS\Exceptions\InvalidIpException) {
+                    d_echo("Nokia TIMOS: Skipping non-IP entry in prefix walk: $index\n");
+                    continue;
+                }
+            } else {
+                $address = implode('.', array_slice($parts, 3));
+            }
+            if (strlen($address) > 15) {
+                try {
+                    $address = IP::fromSnmpString($address)->compressed();
+                } catch (\LibreNMS\Exceptions\InvalidIpException) {
+                    d_echo("Nokia TIMOS: Skipping non-IP entry in prefix walk: $address\n");
+                    continue;
+                }
+            }
+
+            // Build the peer array that add_cbgp_peer() needs
+            $peer = ['ip' => $address];
+
+            $pfxRcv = is_array($recv_entry) ? reset($recv_entry) : ($recv_entry ?? 0);
+            $pfxSent = isset($sent_data[$index])
+                ? (is_array($sent_data[$index]) ? reset($sent_data[$index]) : $sent_data[$index])
+                : 0;
+
+            // Decode oid_key (e.g. "1_1") back to human-readable names
+            [$afi, $safi] = explode('_', $oid_key);
+            $afi_name = $afi_map[(int) $afi] ?? "afi$afi";
+            $safi_name = $safi_map[(int) $safi] ?? "safi$safi";
+
+            d_echo("Nokia TIMOS: Writing — index=$index addr=$address addr_type=$peer_addr_type ({$afi_name}/{$safi_name}) recv=$pfxRcv sent=$pfxSent\n");
+
+            add_cbgp_peer($device, $peer, $afi_name, $safi_name);
+        }
+    }
 }
